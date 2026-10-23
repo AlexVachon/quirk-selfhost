@@ -37,6 +37,7 @@ from .ast use { Expr, Stmt, Param, FunctionDecl, TopLevel }
 from .ast use { IntLit, FloatLit, StringLit, BoolLit, NullLit, Ident, UnaryOp, BinOp, Call, FieldGet, ListLit, Index, Lambda }
 from .ast use { Return, ExprStmt, VarDecl, Assign, FieldSet, If, While, Continue, Break, Match, ForIn, Throw, TryCatch, IndexSet, Func, StructTL, EnumTL, UnionTL }
 from .ast use { StructField, StructDecl, EnumDecl, MatchArm, Variant, UnionDecl }
+from .ast use { named_arg_inner, named_arg_name }
 
 ---
 Module-level codegen state. Right now its only job is the
@@ -177,9 +178,13 @@ struct _VarCgInfo {
 struct _Sig {
     param_tys: List
     ret_ty: String
+    // The declaration's Params (names + default_expr), for binding
+    // named / omitted call arguments. Empty for synthesized sigs.
+    params: List
     define __init(self, param_tys: List, ret_ty: String) -> void {
         self.param_tys = param_tys
         self.ret_ty = ret_ty
+        self.params = List()
     }
 }
 
@@ -482,6 +487,116 @@ struct FnCG {
 // -----------------------------------------------------------------
 // Expression codegen — returns the SSA reg/literal holding the value.
 // -----------------------------------------------------------------
+
+// Value of a `__named__x(v)` wrapper (see ast.named_arg_inner).
+// Separate functions so _gen_expr / _expr_static_ty don't gain
+// another recursive call site.
+// Bind call arguments to the callee's parameters: positional args
+// fill slots left to right, `name = value` args (parsed as
+// `__named__name(value)`) go to the parameter of that name, and any
+// slot still empty takes the parameter's default expression.
+// Returns `args` unchanged when there is nothing to do (no named
+// args, nothing omitted) or when binding isn't possible (unknown
+// callee, variadic params, unknown name, missing arg without a
+// default) — those keep the previous positional behaviour.
+define _bind_call_args(cg: FnCG, llvm_name: String, args: List) -> List {
+    if cg.mod.sigs.has(llvm_name) == false { return args }
+    sig: _Sig := cg.mod.sigs.get(llvm_name)
+    params := sig.params
+    n := params.length()
+    if n == 0 { return args }
+    // Split into positional (in order) and named args.
+    positional := List()
+    named := List()
+    k := 0
+    while k < args.length() {
+        a: Expr := args.__get(k)
+        if _arg_name(a) == "" {
+            positional.append(a)
+        } else {
+            named.append(a)
+        }
+        k = k + 1
+    }
+    if named.length() == 0 and positional.length() >= n { return args }
+    if positional.length() > n { return args }
+    // Every named arg must name a parameter not already filled
+    // positionally.
+    k = 0
+    while k < named.length() {
+        nm := _arg_name(named.__get(k))
+        found := -1
+        j := 0
+        while j < n {
+            pj: Param := params.__get(j)
+            if pj.name == nm { found = j }
+            j = j + 1
+        }
+        if found < positional.length() { return args }
+        k = k + 1
+    }
+    // One value per parameter, in order. Built with append only —
+    // selfhost has no List.__set lowering.
+    bound := List()
+    j := 0
+    while j < n {
+        pk: Param := params.__get(j)
+        if pk.is_variadic { return args }
+        if j < positional.length() {
+            bound.append(positional.__get(j))
+        } else {
+            hit := -1
+            k = 0
+            while k < named.length() {
+                if _arg_name(named.__get(k)) == pk.name { hit = k }
+                k = k + 1
+            }
+            if hit >= 0 {
+                bound.append(_arg_value(named.__get(hit)))
+            } elif pk.default_expr.length() > 0 {
+                bound.append(pk.default_expr.__get(0))
+            } else {
+                return args
+            }
+        }
+        j = j + 1
+    }
+    return bound
+}
+
+// Name of a `__named__name(value)` argument, or "" for a positional one.
+define _arg_name(a: Expr) -> String {
+    match a {
+        case Call as ac => { return named_arg_name(ac) }
+        case _ => {}
+    }
+    return ""
+}
+
+// The wrapped value of a named argument (or the argument itself).
+define _arg_value(a: Expr) -> Expr {
+    match a {
+        case Call as ac => {
+            inner := named_arg_inner(ac)
+            if inner.length() > 0 {
+                v: Expr := inner.__get(0)
+                return v
+            }
+        }
+        case _ => {}
+    }
+    return a
+}
+
+define _gen_named_value(cg: FnCG, inner: List) -> String {
+    v: Expr := inner.__get(0)
+    return _gen_expr(cg, v)
+}
+
+define _static_named_value(cg: FnCG, inner: List) -> String {
+    v: Expr := inner.__get(0)
+    return _expr_static_ty(cg, v)
+}
 
 define _gen_expr(cg: FnCG, e: Expr) -> String {
     match e {
@@ -1423,6 +1538,10 @@ define _gen_expr(cg: FnCG, e: Expr) -> String {
             return reg
         }
         case Call as c => {
+            // Named argument that reached a call path without
+            // parameter binding: just its value (old behaviour).
+            named_v := named_arg_inner(c)
+            if named_v.length() > 0 { return _gen_named_value(cg, named_v) }
             // Method call form: `obj.method(args)` parsed as
             // Call(FieldGet(obj, method), args). Dispatched
             // before the identifier-callee path so the bare
@@ -1887,6 +2006,9 @@ define _gen_expr(cg: FnCG, e: Expr) -> String {
             // a typed nullptr offset by 1 yields the byte size
             // of the struct without compile-time layout math.
             if cg.mod.structs.has(name) {
+                // `__init` defaults / named args (`CustomString()`
+                // with `raw: String = "Hello"`).
+                c.args = _bind_call_args(cg, name + "____init", c.args)
                 return _gen_struct_ctor(cg, name, c.args)
             }
             // Indirect call through a local-bound function
@@ -1966,6 +2088,10 @@ define _gen_expr(cg: FnCG, e: Expr) -> String {
                 cg.emit(ind_reg + " = call i8* " + fp_typed + call_sig)
                 return ind_reg
             }
+            // Named / omitted arguments: reorder into parameter
+            // order and fill defaults (rewrites c.args so the
+            // static-type lookups below see the same order).
+            c.args = _bind_call_args(cg, _llvm_fn_name(name), c.args)
             // Emit each arg first, then the call. Look up the
             // callee's typed signature so each arg + the return
             // is rendered with the matching LLVM type.
@@ -2458,6 +2584,8 @@ define _expr_static_ty(cg: FnCG, e: Expr) -> String {
             return "i32"
         }
         case Call as c => {
+            named_t := named_arg_inner(c)
+            if named_t.length() > 0 { return _static_named_value(cg, named_t) }
             // User-defined call: signature was pre-registered by
             // emit_module, so the return type is known here.
             // A struct constructor call (`Foo(...)`) returns the
@@ -2769,6 +2897,23 @@ define _gen_struct_ctor(cg: FnCG, name: String, ctor_args: List) -> String {
 // `_gen_expr(cg, fg.obj)` separate from the other recursion
 // sites in `_gen_expr`'s arms — the same self-compiler
 // workaround pattern as `_gen_struct_ctor` and `_gen_list_lit`.
+// Call a struct's `__str` and return its text as an i8* C string.
+// Quirk-compiled methods declared `-> String` return the raw C string
+// they built, bitcast to `%struct.String*` (see the Return lowering),
+// so the result is bitcast back rather than unwrapped as a struct.
+// Kept out of _gen_method_call so that function doesn't grow another
+// recursive _gen_* site.
+define _gen_struct_str(cg: FnCG, sname: String, recv_reg: String, recv_ty: String) -> String {
+    sig: _Sig := cg.mod.sigs.get(sname + "____str")
+    res := cg.fresh()
+    cg.emit(res + " = call " + sig.ret_ty + " @" + sname + "____str(" + recv_ty + " " + recv_reg + ")")
+    if sig.ret_ty == "i8*" { return res }
+    if _is_ptr_ty(sig.ret_ty) == false { return res }
+    raw := cg.fresh()
+    cg.emit(raw + " = bitcast " + sig.ret_ty + " " + res + " to i8*")
+    return raw
+}
+
 define _gen_method_call(cg: FnCG, c: Call) -> String {
     fg: FieldGet := c.callee
     // Safe-call `receiver?.method(args)` — when the FieldGet
@@ -3046,6 +3191,9 @@ define _gen_method_call(cg: FnCG, c: Call) -> String {
             recv_ty = inh_recv_ty
             recv_reg = inh_recv_reg
             mtsig: _Sig := cg.mod.sigs.get(full)
+            // Named / omitted method arguments (resolved name, so
+            // inherited methods bind against the parent's params).
+            c.args = _bind_call_args(cg, full, c.args)
             // Build "(self_ty %recv, pty %arg, ...)" using the
             // pre-registered param tys (which already include
             // the self param at index 0).
@@ -3663,6 +3811,10 @@ define _gen_method_call(cg: FnCG, c: Call) -> String {
         // struct-method path; only the "no __str method" case
         // reaches here.
         sname_str := _strip_struct_ptr(recv_ty)
+        // User-defined `__str` (`${v}` / `"x" + v.str()`): call it.
+        if sname_str != recv_ty and cg.mod.sigs.has(sname_str + "____str") {
+            return _gen_struct_str(cg, sname_str, recv_reg, recv_ty)
+        }
         if sname_str != recv_ty and cg.mod.structs.has(sname_str) {
             ph_name := cg.mod.alloc_string("<" + sname_str + ">")
             ph_gep := cg.fresh()
@@ -6768,7 +6920,9 @@ define emit_module(decls: List) -> String {
                 } else {
                     full_name = _llvm_fn_name(fdp.name)
                 }
-                mod.register_sig(full_name, _Sig(ptys, rty))
+                fsig := _Sig(ptys, rty)
+                fsig.params = fdp.params
+                mod.register_sig(full_name, fsig)
             }
             case _ => {}
         }

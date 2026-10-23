@@ -9,10 +9,9 @@ in Quirk itself.
 - **Bootstrap proof.** `bin/quirk-selfhost` compiles its own source
   to byte-identical IR under itself. The language is complete enough
   to describe its own compiler. Verify with `make fixedpoint`.
-- **Working subset compiler.** Handles 40/60 tests from the
-  production compiler's corpus. The remaining 20 tests exercise
-  features the selfhost doesn't yet implement (see
-  [Coverage](#coverage) below).
+- **Working subset compiler.** 39 of the production compiler's 58
+  corpus tests run to completion; 28 produce output identical to
+  `quirk-cpp` (see [Coverage](#coverage) below).
 - **Milestone artifact.** Split out from the main `quirk` repo at
   compiler v5.2.0. Reached its current milestone at
   [`ef857b8`](https://github.com/AlexVachon/quirk/commit/ef857b8)
@@ -21,8 +20,8 @@ in Quirk itself.
 ## Why it lives in its own repo
 
 The selfhost push was an ambitious project that produced a real
-result: byte-identical bootstrap. Now that it's frozen at 40/60
-corpus, keeping ~13k lines of code coupled to the main compiler's
+result: byte-identical bootstrap. Now that it's frozen as a
+subset compiler, keeping ~13k lines of code coupled to the main compiler's
 release cycle has costs (feature parity taxes, doc asterisks, CI
 routing bugs) that outweigh the benefits of same-repo colocation.
 
@@ -101,21 +100,40 @@ src/
 
 ## Coverage
 
-Corpus tests that pass under `bin/quirk-selfhost`: **40 / 60**.
+Run `tools/corpus.sh` (add `-v` for failure details) to measure against
+the sibling quirk checkout's `quirk-compiler/tests/*.quirk`. It reports
+where each test stops — `emit` / `llc` / `link` / `crash` / `exit` — and,
+for tests that run, whether the output matches `bin/quirk-cpp`.
 
-The remaining 20 exercise features the selfhost doesn't yet implement:
+Against quirk v6.0.3 (58 tests):
 
+| | |
+|---|---|
+| Clean exits (ran to completion, exit 0) | **39 / 58** |
+| Output identical to `quirk-cpp` | **28 / 58** |
+
+The old "40/60" figure counted clean exits only, against the v5.1 corpus.
+Recompiled against the current stdlib, it had decayed to 12 clean exits
+and 6 matches, mainly because the selfhost parser didn't know the
+`extern { ... }` blocks typing uses since v5.1.
+
+What the remaining tests need:
+
+- **Value shape tagging.** A `String` is either a raw C string or a
+  runtime `String*`, and lists / maps use selfhost's own layouts
+  (`%QListP`, `%QMap`). Calls into the runtime (JSON, `String.encode`,
+  `List.str()` ...) can't tell which shape they got. This is behind
+  most crashes and most wrong output (`<list>` placeholders, numbers
+  printed for map values).
 - Closure capture (lambda block bodies referencing outer scope)
-- Per-allocation shape tagging (needed to disambiguate `String*` vs
-  raw c-string at runtime)
-- Struct inheritance dispatch beyond `super().__init(...)` on `String`
-- Distinguishable-null `Int?` / `Bool?` representation
-- Named-argument reordering at call sites
 - Variadic-arg auto-packing at call sites
-- Package-aware name resolution (external structs like `File`, `Match`)
+- Distinguishable-null `Int?` / `Bool?` representation
+- Decorators; package-qualified calls (`slug`, `File`); mixed
+  top-level statements + definitions (no `main` synthesized)
+- `List.__set` has no lowering (calls are silently dropped)
 
-Each is a multi-day project. The push is on hold; contributions to
-close the gap are welcome.
+Named arguments and parameter defaults are bound at call sites since the
+v6.0.3 sync (functions, constructors, methods).
 
 ## License
 

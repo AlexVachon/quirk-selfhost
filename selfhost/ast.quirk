@@ -97,11 +97,16 @@ struct Param {
     name: String
     type_annot: String
     is_variadic: Bool
+    // Default value expression (`x: Int = 0`): empty, or one Expr.
+    // A List rather than a nullable Expr keeps the union handling
+    // simple; call-site codegen fills omitted args from it.
+    default_expr: List
 
     define __init(self, name: String, type_annot: String, is_variadic: Bool) -> void {
         self.name = name
         self.type_annot = type_annot
         self.is_variadic = is_variadic
+        self.default_expr = List()
     }
 }
 
@@ -223,3 +228,36 @@ type TopLevel =
     | StructTL(decl: StructDecl)
     | EnumTL(decl: EnumDecl)
     | UnionTL(decl: UnionDecl)
+
+// A named call argument `name = value` is parsed as the synthetic call
+// `__named__name(value)` (see parser._parse_call_arg). Returns
+// `[value]` for such a wrapper, or an empty List for any other call.
+define named_arg_inner(c: Call) -> List {
+    out := List()
+    match c.callee {
+        case Ident as id => {
+            if c.args.length() == 1 and id.name.length() > 9 {
+                if id.name.substring(0, 9) == "__named__" {
+                    out.append(c.args.__get(0))
+                }
+            }
+        }
+        case _ => {}
+    }
+    return out
+}
+
+// The parameter name of a `__named__name(value)` wrapper, or "".
+define named_arg_name(c: Call) -> String {
+    match c.callee {
+        case Ident as id => {
+            if c.args.length() == 1 and id.name.length() > 9 {
+                if id.name.substring(0, 9) == "__named__" {
+                    return id.name.substring(9, id.name.length())
+                }
+            }
+        }
+        case _ => {}
+    }
+    return ""
+}

@@ -29,6 +29,7 @@ from .ast use { Expr, Stmt, Param, FunctionDecl, TopLevel }
 from .ast use { IntLit, FloatLit, StringLit, BoolLit, NullLit, Ident, UnaryOp, BinOp, Call, FieldGet, ListLit, Index, Lambda }
 from .ast use { Return, ExprStmt, VarDecl, Assign, FieldSet, If, While, Continue, Break, Match, ForIn, Throw, TryCatch, IndexSet, Func, StructTL, EnumTL, UnionTL }
 from .ast use { StructField, StructDecl, EnumDecl, MatchArm, Variant, UnionDecl }
+from .ast use { named_arg_inner, named_arg_name }
 from .types use { Ty, TInt, TDouble, TString, TBool, TVoid, TAny, TStruct, TEnum, TUnion, TList, TListP, TMap, TError }
 from .types use { ty_to_string, ty_from_annot, ty_compatible }
 
@@ -412,7 +413,14 @@ define _check_variant_ctor(s: Sema, name: String, args: List) -> Ty {
     return TUnion(info.union_name)
 }
 
+define _check_named_value(s: Sema, inner: List) -> Ty {
+    v: Expr := inner.__get(0)
+    return _check_expr(s, v)
+}
+
 define _check_call(s: Sema, c: Call) -> Ty {
+    named_v := named_arg_inner(c)
+    if named_v.length() > 0 { return _check_named_value(s, named_v) }
     // Method-call form `obj.method(args)` parses as
     // Call(FieldGet(obj, method), args). Phase 4.13 supports
     // a small fixed set: `.length()` on List + String. User-
