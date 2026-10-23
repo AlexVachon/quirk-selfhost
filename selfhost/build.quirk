@@ -341,6 +341,10 @@ define build_combined(entry_path: String, base_dir: String) -> String {
 define compile_combined(entry_path: String, base_dir: String) -> String {
     combined := build_combined(entry_path, base_dir)
     decls := parse(tokenize(combined))
+    if decls.length() == 0 {
+        // parse() printed PARSE FAILED (or the input was empty).
+        return ""
+    }
     errors := check(decls)
     if errors.length() > 0 {
         // Diagnostics route to stderr (via `eprint`) so callers

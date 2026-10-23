@@ -25,6 +25,10 @@
 QUIRK_DIR ?= ../quirk/quirk-compiler
 QUIRK     ?= $(QUIRK_DIR)/bin/quirk-cpp
 RUNTIME   ?= $(QUIRK_DIR)/bin/runtime.so
+# Linked libraries are recorded by the path given to the linker, so a
+# relative RUNTIME made bin/quirk-selfhost loadable only from this repo's
+# root. Link (and rpath) with absolute paths.
+RUNTIME_ABS = $(abspath $(RUNTIME))
 
 BIN_DIR   = bin
 BUILD_DIR = build
@@ -35,6 +39,7 @@ BUILD_DIR = build
 # names. We build a small shim library rather than requiring users to
 # rebuild runtime.so from source — one extra .so, cleanly separated.
 SHIM_LIB = $(BIN_DIR)/selfhost_shim.so
+SHIM_ABS = $(abspath $(SHIM_LIB))
 
 SELFHOST_LL   = $(BUILD_DIR)/quirk_selfhost.ll
 SELFHOST_S    = $(BUILD_DIR)/quirk_selfhost.s
@@ -51,9 +56,9 @@ $(BIN_DIR) $(BUILD_DIR):
 # mangled ones (Sys_ansi, Math_pi, etc.). Compiled as a shared library
 # so we don't have to relink runtime.so.
 $(SHIM_LIB): src/selfhost_aliases.c | $(BIN_DIR)
-	$(CC) -O2 -fPIC -shared -o $@ $< $(RUNTIME) \
+	$(CC) -O2 -fPIC -shared -o $@ $< $(RUNTIME_ABS) \
 		-I$(QUIRK_DIR)/src/Runtime \
-		-Wl,-rpath,$(shell dirname $(RUNTIME))
+		-Wl,-rpath,$(dir $(RUNTIME_ABS))
 
 # Compile selfhost/*.quirk → IR text via the C++ compiler.
 #
@@ -71,8 +76,8 @@ $(SELFHOST_S): $(SELFHOST_LL)
 	llc-14 $< -o $@
 
 $(SELFHOST_BIN): $(SELFHOST_S) $(RUNTIME) $(SHIM_LIB) | $(BIN_DIR)
-	clang-14 -no-pie $(SELFHOST_S) $(RUNTIME) $(SHIM_LIB) -lm -ldl -o $@ \
-		-Wl,-rpath,$(shell dirname $(RUNTIME))
+	clang-14 -no-pie $(SELFHOST_S) $(RUNTIME_ABS) $(SHIM_ABS) -lm -ldl -o $@ \
+		-Wl,-rpath,$(dir $(RUNTIME_ABS))
 	@echo ""
 	@echo "  built: $(SELFHOST_BIN)"
 	@echo "  size:  $$(stat -c%s $(SELFHOST_BIN)) bytes"
@@ -100,8 +105,8 @@ $(FP_IR1): $(SELFHOST_BIN)
 
 $(FP_BIN): $(FP_IR1) $(RUNTIME) $(SHIM_LIB)
 	llc-14 $< -o $(BUILD_DIR)/quirk_selfhost_fp1.s
-	clang-14 -no-pie $(BUILD_DIR)/quirk_selfhost_fp1.s $(RUNTIME) $(SHIM_LIB) \
-		-lm -ldl -o $@ -Wl,-rpath,$(shell dirname $(RUNTIME))
+	clang-14 -no-pie $(BUILD_DIR)/quirk_selfhost_fp1.s $(RUNTIME_ABS) $(SHIM_ABS) \
+		-lm -ldl -o $@ -Wl,-rpath,$(dir $(RUNTIME_ABS))
 
 $(FP_IR2): $(FP_BIN)
 	./$(FP_BIN) selfhost/quirk_main.quirk $@

@@ -1382,12 +1382,18 @@ define _parse_param(s: ParserState) -> Param {
 }
 
 define _parse_function_decl(s: ParserState) -> FunctionDecl {
+    return _parse_function_decl_ex(s, false)
+}
+
+// `force_extern` is set inside an `extern { ... }` block, whose
+// members are written as plain `define` but have no body.
+define _parse_function_decl_ex(s: ParserState, force_extern: Bool) -> FunctionDecl {
     // Optional `extern` prefix: `extern define name(...) -> T`
     // declares an FFI function with no body. Codegen emits an
     // LLVM `declare` instead of a `define`; the runtime supplies
     // the symbol at link time. Used pervasively by the stdlib
     // (io.File, sys.argv, net.http, etc.) to bind C functions.
-    is_extern := false
+    is_extern := force_extern
     if s.match_kind(TokenKind.Extern) {
         is_extern = true
     }
@@ -1453,6 +1459,28 @@ Stops at the EofToken sentinel.
 // struct's name). When `__init` is among the methods, the
 // constructor `Name(args)` lowers to a call into it
 // (Phase 4.22 codegen change).
+// Adopt a method parsed inside a struct body: strip an explicit
+// `self` first param (selfhost source writes it; our method
+// machinery treats `self` as implicit and injects it at codegen),
+// re-target it to the struct (_parse_function_decl leaves
+// receiver="" for bare-name forms), and collect it.
+define _struct_method(mfd: FunctionDecl, struct_name: String, out_methods: List) -> void {
+    if mfd.params.length() > 0 {
+        p0: Param := mfd.params.__get(0)
+        if p0.name == "self" {
+            new_params := List()
+            pi := 1
+            while pi < mfd.params.length() {
+                new_params.append(mfd.params.__get(pi))
+                pi = pi + 1
+            }
+            mfd.params = new_params
+        }
+    }
+    mfd.receiver = struct_name
+    out_methods.append(mfd)
+}
+
 define _parse_struct_decl(s: ParserState, out_methods: List) -> StructDecl {
     s.expect(TokenKind.Struct, "'struct'")
     name := s.expect(TokenKind.Identifier, "struct name").value
@@ -1499,28 +1527,25 @@ define _parse_struct_decl(s: ParserState, out_methods: List) -> StructDecl {
         // (regular method) or `extern define m(...) -> T` (FFI
         // method bound at link time — common in stdlib structs
         // where the C runtime provides the implementation).
+        // `extern { define a(...) ... }` block form (compiler v5.1+,
+        // used by the typing stdlib): every member is an FFI method.
+        if s.check(TokenKind.Extern) {
+            nt: Token := s.peek_at(1)
+            if nt.kind == TokenKind.LBrace {
+                s.advance()
+                s.advance()
+                while s.check(TokenKind.RBrace) == false and s.check(TokenKind.EofToken) == false {
+                    if s.match_kind(TokenKind.Semicolon) { continue }
+                    xfd: FunctionDecl := _parse_function_decl_ex(s, true)
+                    _struct_method(xfd, name, out_methods)
+                }
+                s.expect(TokenKind.RBrace, "'}' to close extern block")
+                continue
+            }
+        }
         if s.check(TokenKind.Define) or s.check(TokenKind.Extern) {
             mfd: FunctionDecl := _parse_function_decl(s)
-            // Strip an explicit `self` first param (selfhost
-            // source writes it; our method machinery treats
-            // `self` as implicit and injects it at codegen).
-            if mfd.params.length() > 0 {
-                p0: Param := mfd.params.__get(0)
-                if p0.name == "self" {
-                    new_params := List()
-                    pi := 1
-                    while pi < mfd.params.length() {
-                        new_params.append(mfd.params.__get(pi))
-                        pi = pi + 1
-                    }
-                    mfd.params = new_params
-                }
-            }
-            // Re-target the method to this struct. The existing
-            // _parse_function_decl produces receiver="" for
-            // bare-name forms; we set it post-hoc.
-            mfd.receiver = name
-            out_methods.append(mfd)
+            _struct_method(mfd, name, out_methods)
             continue
         }
         // Accept keyword tokens as field names too (`type`,
@@ -1913,6 +1938,10 @@ define parse(tokens: List) -> List {
         // "SEMA FAILED" prefixes.
         print("PARSE FAILED:")
         print("  " + s.error_msg)
+        // No declarations = failure for compile_combined; otherwise a
+        // partial program compiled to IR without `main` and the error
+        // only surfaced as a link failure.
+        return List()
     }
     // Script-mode main synthesis: only when the source contains
     // ZERO top-level declarations (i.e. it's a pure script file
