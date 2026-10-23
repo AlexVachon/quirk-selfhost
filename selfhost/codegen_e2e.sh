@@ -12,9 +12,16 @@ set -u
 # v5.0.0: `bin/quirk` is the selfhost-driven driver wrapper now.
 # This suite exercises the C++ compiler's codegen — point at the
 # renamed binary directly. Override with `QUIRK=…` to retarget.
-QUIRK="${QUIRK:-./bin/quirk-cpp}"
+# Defaults assume the sibling-checkout layout (../quirk next to this
+# repo), same as the Makefile. Override QUIRK / RUNTIME / QUIRK_DIR.
+QUIRK_DIR="${QUIRK_DIR:-$(cd "$(dirname "$0")/../../quirk/quirk-compiler" 2>/dev/null && pwd)}"
+QUIRK="${QUIRK:-$QUIRK_DIR/bin/quirk-cpp}"
+RUNTIME="${RUNTIME:-$QUIRK_DIR/bin/runtime.so}"
 LLI="${LLI:-lli-14}"
-export QUIRK_HOME="${QUIRK_HOME:-$(pwd)}"
+# Always the checkout's own runtime/stdlib: an inherited QUIRK_HOME
+# (e.g. ~/.quirk from an older install) pairs this quirk-cpp with a
+# mismatched runtime.so and every case fails with empty IR.
+export QUIRK_HOME="$QUIRK_DIR"
 
 declare -i fails=0
 
@@ -1189,7 +1196,8 @@ EOF
     # exception bridge (quirk_get_jmp_buf / quirk_set_exception
     # / quirk_get_exception / quirk_pop_try) resolves. Unused
     # helpers don't affect the resulting binary.
-    "${CLANG:-clang-14}" -no-pie "$s_path" bin/runtime.so -lm -ldl -o "$bin_path" 2>/dev/null
+    "${CLANG:-clang-14}" -no-pie "$s_path" "$RUNTIME" -lm -ldl -o "$bin_path" \
+        -Wl,-rpath,"$(dirname "$RUNTIME")" 2>/dev/null
     if [ ! -x "$bin_path" ]; then
         echo "FAIL  $label  (clang link failed)"
         echo "      asm at $s_path"
