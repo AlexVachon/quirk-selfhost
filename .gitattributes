@@ -1,0 +1,9 @@
+# Force LF regardless of the contributor's git config (core.autocrlf on
+# Windows / WSL checks text out as CRLF, which breaks the shell scripts
+# with `$'\r'` errors). Mirrors quirk's .gitattributes.
+* text=auto eol=lf
+*.sh     text eol=lf
+Makefile text eol=lf
+*.quirk  text eol=lf
+*.c      text eol=lf
+*.md     text eol=lf
