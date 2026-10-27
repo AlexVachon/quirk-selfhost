@@ -285,9 +285,20 @@ struct ModuleCG {
         self.next_str = self.next_str + 1
         n := text.length() + 1
         encoded := _llvm_encode_string(text)
-        line := name + " = private unnamed_addr constant [" + n.str() +
-                " x i8] c\"" + encoded + "\\00\""
+        // Headered like a heap selfhost String (_emit_cstr_alloc): the
+        // bytes live in { header, [n x i8] } (16-aligned), and @.str.N is
+        // an alias for the array part, so every existing
+        // `getelementptr [n x i8], [n x i8]* @.str.N` keeps working.
+        arr_ty := "[" + n.str() + " x i8]"
+        box_ty := "{ [2 x i32], " + arr_ty + " }"
+        hname := "@.strh." + (self.next_str - 1).str()
+        line := hname + " = private unnamed_addr constant " + box_ty +
+                " { [2 x i32] [i32 1263686993, i32 14], " + arr_ty + " c\"" + encoded +
+                "\\00\" }, align 16"
         self.globals.append(line)
+        alias := name + " = private alias " + arr_ty + ", getelementptr inbounds (" +
+                 box_ty + ", " + box_ty + "* " + hname + ", i32 0, i32 1)"
+        self.globals.append(alias)
         return name
     }
 
@@ -630,6 +641,26 @@ define _gen_named_value(cg: FnCG, inner: List) -> String {
 define _static_named_value(cg: FnCG, inner: List) -> String {
     v: Expr := inner.__get(0)
     return _expr_static_ty(cg, v)
+}
+
+// Allocate a selfhost String value (raw NUL-terminated char*) with the
+// runtime's type header in front, so runtime code can tell it from a
+// runtime String* (see QuirkHeader in quirk/Runtime/types.h): malloc
+// n + 8 (16-aligned), write {magic, QT_CSTR} at offset 0, and define
+// `dest` as raw + 8 — so dest ≡ 8 (mod 16), as quirk_type_of expects.
+// Still malloc'd: selfhost lists/maps live outside the GC heap, so
+// these strings must not be collectable. Intermediates use named
+// registers so the numbered `dest` (fresh()'d by the caller) stays in
+// emit order.
+define _emit_cstr_alloc(cg: FnCG, dest: String, size: String) -> void {
+    cg.mod.ensure_decl("malloc", "declare i8* @malloc(i64)")
+    lbl := "%" + cg.fresh_label("cstr")
+    cg.emit(lbl + ".sz = add i64 " + size + ", 8")
+    cg.emit(lbl + ".raw = call i8* @malloc(i64 " + lbl + ".sz)")
+    cg.emit(lbl + ".hdr = bitcast i8* " + lbl + ".raw to i64*")
+    // 61393229137 = QT_CSTR (14) << 32 | QUIRK_HDR_MAGIC (0x4B525551)
+    cg.emit("store i64 61393229137, i64* " + lbl + ".hdr")
+    cg.emit(dest + " = getelementptr inbounds i8, i8* " + lbl + ".raw, i64 8")
 }
 
 define _gen_expr(cg: FnCG, e: Expr) -> String {
@@ -1227,7 +1258,7 @@ define _gen_expr(cg: FnCG, e: Expr) -> String {
                 total := cg.fresh()
                 cg.emit(total + " = add i64 " + sum + ", 1")
                 buf := cg.fresh()
-                cg.emit(buf + " = call i8* @malloc(i64 " + total + ")")
+                _emit_cstr_alloc(cg, buf, total)
                 cpy := cg.fresh()
                 cg.emit(cpy + " = call i8* @strcpy(i8* " + buf + ", i8* " + l + ")")
                 cat := cg.fresh()
@@ -3612,7 +3643,7 @@ define _gen_method_call(cg: FnCG, c: Call) -> String {
         fmt_reg := cg.fresh()
         cg.emit(fmt_reg + " = getelementptr inbounds [" + (cfmt.length() + 1).str() + " x i8], [" + (cfmt.length() + 1).str() + " x i8]* " + fmt_const + ", i64 0, i64 0")
         buf_reg := cg.fresh()
-        cg.emit(buf_reg + " = call i8* @malloc(i64 64)")
+        _emit_cstr_alloc(cg, buf_reg, "64")
         // Pick the right arg type for the snprintf vararg slot.
         arg_ty_str := recv_ty
         recv_pass := recv_reg
@@ -3789,7 +3820,7 @@ define _gen_method_call(cg: FnCG, c: Call) -> String {
             if recv_val == "null" { recv_val = "0" }
             fmt := cg.mod.alloc_string("%d")
             buf := cg.fresh()
-            cg.emit(buf + " = call i8* @malloc(i64 12)")
+            _emit_cstr_alloc(cg, buf, "12")
             fmt_gep := cg.fresh()
             cg.emit(fmt_gep + " = getelementptr inbounds [3 x i8], [3 x i8]* " +
                     fmt + ", i64 0, i64 0")
@@ -3806,7 +3837,7 @@ define _gen_method_call(cg: FnCG, c: Call) -> String {
                 "declare i32 @snprintf(i8*, i64, i8*, ...)")
             fmt := cg.mod.alloc_string("%g")
             buf := cg.fresh()
-            cg.emit(buf + " = call i8* @malloc(i64 32)")
+            _emit_cstr_alloc(cg, buf, "32")
             fmt_gep := cg.fresh()
             cg.emit(fmt_gep + " = getelementptr inbounds [3 x i8], [3 x i8]* " +
                     fmt + ", i64 0, i64 0")
@@ -4248,7 +4279,7 @@ define _gen_to_string(cg: FnCG, val: String, ty: String) -> String {
     cg.emit(fmt_gep + " = getelementptr inbounds [3 x i8], [3 x i8]* " +
             fmt + ", i64 0, i64 0")
     buf := cg.fresh()
-    cg.emit(buf + " = call i8* @malloc(i64 32)")
+    _emit_cstr_alloc(cg, buf, "32")
     // Assign the snprintf return to a fresh register even though
     // we discard it — every LLVM instruction implicitly consumes
     // a slot in the auto-numbering sequence; a bare `call`
@@ -4286,7 +4317,7 @@ define _gen_string_case(cg: FnCG, name: String, recv_reg: String) -> String {
     sz := cg.fresh()
     cg.emit(sz + " = add i64 " + n64 + ", 1")
     buf := cg.fresh()
-    cg.emit(buf + " = call i8* @malloc(i64 " + sz + ")")
+    _emit_cstr_alloc(cg, buf, sz)
     cg.emit("store i64 0, i64* " + cnt_slot)
     body_lbl := cg.fresh_label("strcase.body")
     end_lbl := cg.fresh_label("strcase.end")
@@ -4345,7 +4376,7 @@ define _gen_string_method(cg: FnCG, name: String, recv_reg: String, args: List) 
         bytes_i64 := cg.fresh()
         cg.emit(bytes_i64 + " = add nsw i64 " + len_i64 + ", 1")
         buf := cg.fresh()
-        cg.emit(buf + " = call i8* @malloc(i64 " + bytes_i64 + ")")
+        _emit_cstr_alloc(cg, buf, bytes_i64)
         // Source pointer = recv + a.
         a_i64 := cg.fresh()
         cg.emit(a_i64 + " = sext i32 " + a + " to i64")
@@ -4492,7 +4523,13 @@ define _str_join_helper_ir() -> String {
     // Allocate result buffer (total + 1 for the null terminator)
     out = out + "  %total_final = load i64, i64* %total_slot\n"
     out = out + "  %alloc_sz = add nsw i64 %total_final, 1\n"
-    out = out + "  %buf = call i8* @malloc(i64 %alloc_sz)\n"
+    // Headered selfhost String (see _emit_cstr_alloc): malloc n + 8,
+    // header {magic, QT_CSTR} at offset 0, result at offset 8.
+    out = out + "  %alloc_sz_h = add i64 %alloc_sz, 8\n"
+    out = out + "  %buf_raw = call i8* @malloc(i64 %alloc_sz_h)\n"
+    out = out + "  %buf_hdr = bitcast i8* %buf_raw to i64*\n"
+    out = out + "  store i64 61393229137, i64* %buf_hdr\n"
+    out = out + "  %buf = getelementptr inbounds i8, i8* %buf_raw, i64 8\n"
     // Write a leading null so strcat starts from offset 0.
     out = out + "  store i8 0, i8* %buf\n"
     // Reset index.
@@ -4605,7 +4642,7 @@ define _gen_read_file(cg: FnCG, args: List) -> String {
     alloc_size := cg.fresh()
     cg.emit(alloc_size + " = add nsw i64 " + size + ", 1")
     buf := cg.fresh()
-    cg.emit(buf + " = call i8* @malloc(i64 " + alloc_size + ")")
+    _emit_cstr_alloc(cg, buf, alloc_size)
     read_n := cg.fresh()
     cg.emit(read_n + " = call i64 @fread(i8* " + buf + ", i64 1, i64 " +
             size + ", i8* " + fp + ")")

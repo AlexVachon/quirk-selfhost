@@ -699,53 +699,66 @@ void* __qsh_map_keys  (void* m)                    { return Core_Collections_Map
 void* __qsh_map_values(void* m)                    { return Core_Collections_Map_Map_values(m); }
 
 // String.
-// Each __qsh_str_* wrapper boxes c-string i8* args via make_String
-// before forwarding. Core_String_String_* expects String* (it reads
-// `->buffer` / `->length`). Selfhost hands us a raw c-string pointer
-// in these paths because the receiver type was opaque i8*.
-void* __qsh_str_ljust    (void* s, int w, void* p) { return Core_String_String_ljust(s, w, p); }
-void* __qsh_str_rjust    (void* s, int w, void* p) { return Core_String_String_rjust(s, w, p); }
-void* __qsh_str_center   (void* s, int w, void* p) { return Core_String_String_center(s, w, p); }
-void* __qsh_str_encode   (void* s)                                { return Core_String_String_encode(s); }
-int   __qsh_str_distance (void* s, void* other)                   { return Core_String_String_distance(s, other); }
-void* __qsh_str_replace  (void* s, void* from, void* to)          { return Core_String_String_replace(s, from, to); }
-void* __qsh_str_remove   (void* s, void* needle)                  { return Core_String_String_remove(s, needle); }
-// Convert from QListP layout if it looks like one. The runtime
-// join expects List with `{ void** data, int size, int capacity }`
-// fields. selfhost passes a %QListP* with `{ length, capacity, data }`
-// — bitcast at the call site doesn't reorder. We can't disambiguate
-// from C alone, but the bootstrap-time `__qsh_qlistp_to_list` is
-// always safe to call (it returns a fresh runtime List that join
-// can iterate).
-extern void* __qsh_qlistp_to_list(void* qlistp);
+// Selfhost String values are raw char* (headered QT_CSTR since the
+// v6.1.4 sync); the runtime's Core_String_String_* functions take a
+// String*. Each bridge converts its string arguments with
+// qsh_as_string (String* passes through, a selfhost C string is
+// wrapped). Before, the raw pointers were passed straight through as
+// String* (`"x".encode()` crashed in strlen). Results stay String*:
+// selfhost types these calls' values as %struct.String* and reads
+// `->buffer` from them — except join, whose caller uses the result as a
+// raw C string; that one comes back headered and malloc'd (qsh_cstr_out),
+// since selfhost keeps values in malloc'd lists / maps the GC can't see.
+// String arguments here are known to be strings, so no tagged-Int
+// reading: a headered runtime String* passes through, anything else is a
+// selfhost raw C string — including literals, which sit below 4 GiB in
+// selfhost's non-PIE binaries (a generic reader would take them for
+// small Ints).
+static String* qsh_as_string(void* p) {
+    if (!p) return NULL;
+    if (quirk_type_of(p) == QT_STRING) return (String*)p;
+    return make_String((const char*)p);
+}
+
+static void* qsh_cstr_out(String* r) {
+    const char* src = (r && r->buffer) ? r->buffer : "";
+    size_t n = strlen(src);
+    char* raw = (char*)malloc(n + 1 + 8);      // 16-aligned; header in front
+    ((uint32_t*)raw)[0] = QUIRK_HDR_MAGIC;
+    ((uint32_t*)raw)[1] = QT_CSTR;
+    memcpy(raw + 8, src, n + 1);
+    return raw + 8;
+}
+#define S(x) qsh_as_string(x)
+
+void* __qsh_str_ljust    (void* s, int w, void* p) { return Core_String_String_ljust(S(s), w, S(p)); }
+void* __qsh_str_rjust    (void* s, int w, void* p) { return Core_String_String_rjust(S(s), w, S(p)); }
+void* __qsh_str_center   (void* s, int w, void* p) { return Core_String_String_center(S(s), w, S(p)); }
+void* __qsh_str_encode   (void* s)                 { return Core_String_String_encode(S(s)); }
+int   __qsh_str_distance (void* s, void* other)    { return Core_String_String_distance(S(s), S(other)); }
+void* __qsh_str_replace  (void* s, void* from, void* to) { return Core_String_String_replace(S(s), S(from), S(to)); }
+void* __qsh_str_remove   (void* s, void* needle)   { return Core_String_String_remove(S(s), S(needle)); }
 // The `xs` receiver reaches us as a runtime List — selfhost's
 // VarDecl / call-boundary bridge converts %QListP → %struct.List
-// before values flow into these aliases. Pass through. Return
-// the c-string buffer directly — selfhost's declare types this
-// as `i8* @__qsh_str_join(...)` and the caller uses it as a
-// raw c-string (e.g. `puts(%result)`).
-// __qsh_str_join specifically NEEDS the wrap because:
-// 1. `s` is a raw c-string (the separator literal, e.g. ", ")
-// 2. Return value is used as a raw c-string in puts / concat
-// The other __qsh_str_* aliases receive already-wrapped String*
-// from stdlib helpers, so no wrap needed.
+// before values flow into these aliases.
+extern void* __qsh_qlistp_to_list(void* qlistp);
 void* __qsh_str_join(void* s, void* xs) {
-    String* r = Core_String_String_join(make_String((char*)s), (List*)xs);
-    return (r && r->buffer) ? (void*)r->buffer : (void*)"";
+    return qsh_cstr_out(Core_String_String_join(S(s), (List*)xs));
 }
-void* __qsh_str_split    (void* s, void* sep)      { return Core_String_String_split(s, sep); }
-void* __qsh_str_lines    (void* s)                 { return Core_String_String_lines(s); }
-void* __qsh_str_repeat   (void* s, int n)          { return Core_String_String_repeat(s, n); }
-int   __qsh_str_to_int   (void* s)                 { return Core_String_String_to_int(s); }
-double __qsh_str_to_float(void* s)                 { return Core_String_String_to_float(s); }
-int   __qsh_str_find     (void* s, void* n)        { return Core_String_String_find(s, n); }
-int   __qsh_str_index    (void* s, void* n)        { return Core_String_String_index(s, n); }
-int   __qsh_str_count    (void* s, void* n)        { return Core_String_String_count(s, n); }
-int   __qsh_str_is_alpha (void* s)                 { return Core_String_String_is_alpha(s); }
-int   __qsh_str_is_digit (void* s)                 { return Core_String_String_is_digit(s); }
-int   __qsh_str_is_lower (void* s)                 { return Core_String_String_is_lower(s); }
-int   __qsh_str_is_upper (void* s)                 { return Core_String_String_is_upper(s); }
-int   __qsh_str_is_space (void* s)                 { return Core_String_String_is_space(s); }
+void* __qsh_str_split    (void* s, void* sep)      { return Core_String_String_split(S(s), S(sep)); }
+void* __qsh_str_lines    (void* s)                 { return Core_String_String_lines(S(s)); }
+void* __qsh_str_repeat   (void* s, int n)          { return Core_String_String_repeat(S(s), n); }
+int   __qsh_str_to_int   (void* s)                 { return Core_String_String_to_int(S(s)); }
+double __qsh_str_to_float(void* s)                 { return Core_String_String_to_float(S(s)); }
+int   __qsh_str_find     (void* s, void* n)        { return Core_String_String_find(S(s), S(n)); }
+int   __qsh_str_index    (void* s, void* n)        { return Core_String_String_index(S(s), S(n)); }
+int   __qsh_str_count    (void* s, void* n)        { return Core_String_String_count(S(s), S(n)); }
+int   __qsh_str_is_alpha (void* s)                 { return Core_String_String_is_alpha(S(s)); }
+int   __qsh_str_is_digit (void* s)                 { return Core_String_String_is_digit(S(s)); }
+int   __qsh_str_is_lower (void* s)                 { return Core_String_String_is_lower(S(s)); }
+int   __qsh_str_is_upper (void* s)                 { return Core_String_String_is_upper(S(s)); }
+int   __qsh_str_is_space (void* s)                 { return Core_String_String_is_space(S(s)); }
+#undef S
 
 // ---- Layout conversion: QListP → runtime List --------------------------
 //
