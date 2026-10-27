@@ -56,7 +56,8 @@ $(BIN_DIR) $(BUILD_DIR):
 # mangled ones (Sys_ansi, Math_pi, etc.). Compiled as a shared library
 # so we don't have to relink runtime.so.
 $(SHIM_LIB): src/selfhost_aliases.c | $(BIN_DIR)
-	$(CC) -O2 -fPIC -shared -o $@ $< $(RUNTIME_ABS) \
+	$(CC) -O2 -fPIC -shared -Werror=implicit-function-declaration -Werror=int-conversion \
+		-o $@ $< $(RUNTIME_ABS) \
 		-I$(QUIRK_DIR)/src/Runtime \
 		-Wl,-rpath,$(dir $(RUNTIME_ABS))
 
@@ -73,10 +74,10 @@ $(SELFHOST_LL): $(wildcard selfhost/*.quirk) | $(BUILD_DIR)
 		|| (rm -f $@ && echo "selfhost IR emission failed" && exit 1)
 
 $(SELFHOST_S): $(SELFHOST_LL)
-	llc-14 $< -o $@
+	llc-14 -relocation-model=pic $< -o $@
 
 $(SELFHOST_BIN): $(SELFHOST_S) $(RUNTIME) $(SHIM_LIB) | $(BIN_DIR)
-	clang-14 -no-pie $(SELFHOST_S) $(RUNTIME_ABS) $(SHIM_ABS) -lm -ldl -o $@ \
+	clang-14 -pie $(SELFHOST_S) $(RUNTIME_ABS) $(SHIM_ABS) -lm -ldl -o $@ \
 		-Wl,-rpath,$(dir $(RUNTIME_ABS))
 	@echo ""
 	@echo "  built: $(SELFHOST_BIN)"
@@ -104,8 +105,8 @@ $(FP_IR1): $(SELFHOST_BIN)
 	./$(SELFHOST_BIN) selfhost/quirk_main.quirk $@
 
 $(FP_BIN): $(FP_IR1) $(RUNTIME) $(SHIM_LIB)
-	llc-14 $< -o $(BUILD_DIR)/quirk_selfhost_fp1.s
-	clang-14 -no-pie $(BUILD_DIR)/quirk_selfhost_fp1.s $(RUNTIME_ABS) $(SHIM_ABS) \
+	llc-14 -relocation-model=pic $< -o $(BUILD_DIR)/quirk_selfhost_fp1.s
+	clang-14 -pie $(BUILD_DIR)/quirk_selfhost_fp1.s $(RUNTIME_ABS) $(SHIM_ABS) \
 		-lm -ldl -o $@ -Wl,-rpath,$(dir $(RUNTIME_ABS))
 
 $(FP_IR2): $(FP_BIN)

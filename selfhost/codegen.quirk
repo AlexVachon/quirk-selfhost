@@ -652,6 +652,19 @@ define _static_named_value(cg: FnCG, inner: List) -> String {
 // these strings must not be collectable. Intermediates use named
 // registers so the numbered `dest` (fresh()'d by the caller) stays in
 // emit order.
+// Text (i8*) of a value typed %struct.String*. Selfhost uses that type
+// both for real runtime String* objects and for raw C strings bitcast to
+// it, so the field-0 buffer load is done by the shim, which tells the two
+// apart by the type header. Null in, null out.
+define _emit_string_text(cg: FnCG, reg: String) -> String {
+    cg.mod.ensure_decl("__qsh_cstr_of", "declare i8* @__qsh_cstr_of(i8*)")
+    raw := cg.fresh()
+    cg.emit(raw + " = bitcast %struct.String* " + reg + " to i8*")
+    txt := cg.fresh()
+    cg.emit(txt + " = call i8* @__qsh_cstr_of(i8* " + raw + ")")
+    return txt
+}
+
 define _emit_cstr_alloc(cg: FnCG, dest: String, size: String) -> void {
     cg.mod.ensure_decl("malloc", "declare i8* @malloc(i64)")
     lbl := "%" + cg.fresh_label("cstr")
@@ -819,11 +832,7 @@ define _gen_expr(cg: FnCG, e: Expr) -> String {
                 }
                 buf := base_reg
                 if base_ty == "%struct.String*" {
-                    gep := cg.fresh()
-                    cg.emit(gep + " = getelementptr inbounds %struct.String, %struct.String* " + base_reg + ", i32 0, i32 0")
-                    bufreg := cg.fresh()
-                    cg.emit(bufreg + " = load i8*, i8** " + gep)
-                    buf = bufreg
+                    buf = _emit_string_text(cg, base_reg)
                 }
                 idx64 := idx_reg
                 if idx_ty2 == "i32" {
@@ -998,9 +1007,9 @@ define _gen_expr(cg: FnCG, e: Expr) -> String {
                 if opd_ty != "i1" {
                     if _is_ptr_ty(opd_ty) {
                         p2i := cg.fresh()
-                        cg.emit(p2i + " = ptrtoint " + opd_ty + " " + v + " to i32")
+                        cg.emit(p2i + " = ptrtoint " + opd_ty + " " + v + " to i64")
                         cmp := cg.fresh()
-                        cg.emit(cmp + " = icmp ne i32 " + p2i + ", 0")
+                        cg.emit(cmp + " = icmp ne i64 " + p2i + ", 0")
                         v_use = cmp
                     } elif opd_ty == "i32" {
                         cmp := cg.fresh()
@@ -1065,56 +1074,18 @@ define _gen_expr(cg: FnCG, e: Expr) -> String {
                 r_ty := _expr_static_ty(cg, b.right)
                 l := _gen_expr(cg, b.left)
                 r := _gen_expr(cg, b.right)
-                // %struct.String* → i8* by extracting buffer (field 0).
-                // Null-guarded via branch: stdlib helpers can
-                // return a null String* on lookup miss (e.g.
-                // sys.env, map.get), and blindly GEP+load through
-                // null segfaults. Update l_ty / r_ty to match
+                // %struct.String* → its text (i8*). Null stays null:
+                // stdlib helpers can return a null String* on lookup
+                // miss (e.g. sys.env, map.get). Update l_ty / r_ty to match
                 // the new value so the downstream `<list>`
                 // placeholder branch doesn't re-replace the
                 // just-extracted buffer.
                 if l_ty == "%struct.String*" {
-                    slot_lu := "%" + cg.fresh_label("strex.l")
-                    cg.emit_entry(slot_lu + " = alloca i8*")
-                    cg.emit("store i8* null, i8** " + slot_lu)
-                    nn_lu := cg.fresh()
-                    cg.emit(nn_lu + " = icmp ne %struct.String* " + l + ", null")
-                    ok_lu := cg.fresh_label("sx.ok")
-                    end_lu := cg.fresh_label("sx.end")
-                    cg.emit("br i1 " + nn_lu + ", label %" + ok_lu + ", label %" + end_lu)
-                    cg.emit_raw(ok_lu + ":")
-                    gepl := cg.fresh()
-                    cg.emit(gepl + " = getelementptr inbounds %struct.String, %struct.String* " + l + ", i32 0, i32 0")
-                    lbuf := cg.fresh()
-                    cg.emit(lbuf + " = load i8*, i8** " + gepl)
-                    cg.emit("store i8* " + lbuf + ", i8** " + slot_lu)
-                    cg.emit("br label %" + end_lu)
-                    cg.emit_raw(end_lu + ":")
-                    final_lu := cg.fresh()
-                    cg.emit(final_lu + " = load i8*, i8** " + slot_lu)
-                    l = final_lu
+                    l = _emit_string_text(cg, l)
                     l_ty = "i8*"
                 }
                 if r_ty == "%struct.String*" {
-                    slot_ru := "%" + cg.fresh_label("strex.r")
-                    cg.emit_entry(slot_ru + " = alloca i8*")
-                    cg.emit("store i8* null, i8** " + slot_ru)
-                    nn_ru := cg.fresh()
-                    cg.emit(nn_ru + " = icmp ne %struct.String* " + r + ", null")
-                    ok_ru := cg.fresh_label("sx.ok")
-                    end_ru := cg.fresh_label("sx.end")
-                    cg.emit("br i1 " + nn_ru + ", label %" + ok_ru + ", label %" + end_ru)
-                    cg.emit_raw(ok_ru + ":")
-                    gepr := cg.fresh()
-                    cg.emit(gepr + " = getelementptr inbounds %struct.String, %struct.String* " + r + ", i32 0, i32 0")
-                    rbuf := cg.fresh()
-                    cg.emit(rbuf + " = load i8*, i8** " + gepr)
-                    cg.emit("store i8* " + rbuf + ", i8** " + slot_ru)
-                    cg.emit("br label %" + end_ru)
-                    cg.emit_raw(end_ru + ":")
-                    final_ru := cg.fresh()
-                    cg.emit(final_ru + " = load i8*, i8** " + slot_ru)
-                    r = final_ru
+                    r = _emit_string_text(cg, r)
                     r_ty = "i8*"
                 }
                 // Opaque-source concat operand: an Index /
@@ -1294,51 +1265,11 @@ define _gen_expr(cg: FnCG, e: Expr) -> String {
                 if opd_ty == "%struct.String*" or rt_cmp == "%struct.String*" {
                     opd_ty = "i8*"
                     if _expr_static_ty(cg, b.left) == "%struct.String*" {
-                        // Guard the buffer load with a branch so we
-                        // don't dereference a null String*. Loads
-                        // in an unreachable arm still exist in the
-                        // IR but never execute — select alone
-                        // would evaluate both operands eagerly.
-                        slot_lc := "%" + cg.fresh_label("nullchk.l")
-                        cg.emit_entry(slot_lc + " = alloca i8*")
-                        cg.emit("store i8* null, i8** " + slot_lc)
-                        nn_lc := cg.fresh()
-                        cg.emit(nn_lc + " = icmp ne %struct.String* " + l + ", null")
-                        ok_lc := cg.fresh_label("nc.ok")
-                        end_lc := cg.fresh_label("nc.end")
-                        cg.emit("br i1 " + nn_lc + ", label %" + ok_lc + ", label %" + end_lc)
-                        cg.emit_raw(ok_lc + ":")
-                        gepl_c := cg.fresh()
-                        cg.emit(gepl_c + " = getelementptr inbounds %struct.String, %struct.String* " + l + ", i32 0, i32 0")
-                        lbuf_c := cg.fresh()
-                        cg.emit(lbuf_c + " = load i8*, i8** " + gepl_c)
-                        cg.emit("store i8* " + lbuf_c + ", i8** " + slot_lc)
-                        cg.emit("br label %" + end_lc)
-                        cg.emit_raw(end_lc + ":")
-                        final_l := cg.fresh()
-                        cg.emit(final_l + " = load i8*, i8** " + slot_lc)
-                        l = final_l
+                        // Null String* → null i8* (no dereference).
+                        l = _emit_string_text(cg, l)
                     }
                     if rt_cmp == "%struct.String*" {
-                        slot_rc := "%" + cg.fresh_label("nullchk.r")
-                        cg.emit_entry(slot_rc + " = alloca i8*")
-                        cg.emit("store i8* null, i8** " + slot_rc)
-                        nn_rc := cg.fresh()
-                        cg.emit(nn_rc + " = icmp ne %struct.String* " + r + ", null")
-                        ok_rc := cg.fresh_label("nc.ok")
-                        end_rc := cg.fresh_label("nc.end")
-                        cg.emit("br i1 " + nn_rc + ", label %" + ok_rc + ", label %" + end_rc)
-                        cg.emit_raw(ok_rc + ":")
-                        gepr_c := cg.fresh()
-                        cg.emit(gepr_c + " = getelementptr inbounds %struct.String, %struct.String* " + r + ", i32 0, i32 0")
-                        rbuf_c := cg.fresh()
-                        cg.emit(rbuf_c + " = load i8*, i8** " + gepr_c)
-                        cg.emit("store i8* " + rbuf_c + ", i8** " + slot_rc)
-                        cg.emit("br label %" + end_rc)
-                        cg.emit_raw(end_rc + ":")
-                        final_r := cg.fresh()
-                        cg.emit(final_r + " = load i8*, i8** " + slot_rc)
-                        r = final_r
+                        r = _emit_string_text(cg, r)
                     }
                 }
                 // String comparisons — all six predicates
@@ -1781,14 +1712,8 @@ define _gen_expr(cg: FnCG, e: Expr) -> String {
                     arg_reg = "null"
                     arg_ty = "i8*"
                 } elif arg_ty == "%struct.String*" {
-                    // Extract _buffer field — runtime String is
-                    // `{ i8* buffer, i32 length }`; we want the
-                    // char-ptr.
-                    gep_buf := cg.fresh()
-                    cg.emit(gep_buf + " = getelementptr inbounds %struct.String, %struct.String* " + arg_reg + ", i32 0, i32 0")
-                    buf := cg.fresh()
-                    cg.emit(buf + " = load i8*, i8** " + gep_buf)
-                    arg_reg = buf
+                    // Print the text (see _emit_string_text).
+                    arg_reg = _emit_string_text(cg, arg_reg)
                 } elif arg_ty == "i1" {
                     // print(bool) — emit `select i1 b, "true",
                     // "false"`. The two strings are interned via
@@ -3211,12 +3136,7 @@ define _gen_method_call(cg: FnCG, c: Call) -> String {
         arg_t_si := _expr_static_ty(cg, arg_e_si)
         // Unwrap %struct.String* → buffer i8*.
         if arg_t_si == "%struct.String*" {
-            gep_b_si := cg.fresh()
-            cg.emit(gep_b_si + " = getelementptr inbounds %struct.String, %struct.String* "
-                    + arg_v_si + ", i32 0, i32 0")
-            buf_si := cg.fresh()
-            cg.emit(buf_si + " = load i8*, i8** " + gep_b_si)
-            arg_v_si = buf_si
+            arg_v_si = _emit_string_text(cg, arg_v_si)
         }
         r_si := cg.fresh()
         cg.emit(r_si + " = call i32 @String____init(%struct.String* " + recv_reg
@@ -3504,12 +3424,7 @@ define _gen_method_call(cg: FnCG, c: Call) -> String {
                       or fg.name == "trim" or fg.name == "split"
                       or fg.name == "replace"
         if is_str_method {
-            gep_buf_sm := cg.fresh()
-            cg.emit(gep_buf_sm + " = getelementptr inbounds %struct.String, %struct.String* "
-                    + recv_reg + ", i32 0, i32 0")
-            buf_sm := cg.fresh()
-            cg.emit(buf_sm + " = load i8*, i8** " + gep_buf_sm)
-            recv_reg = buf_sm
+            recv_reg = _emit_string_text(cg, recv_reg)
             recv_ty = "i8*"
         }
     }
@@ -3648,11 +3563,7 @@ define _gen_method_call(cg: FnCG, c: Call) -> String {
         arg_ty_str := recv_ty
         recv_pass := recv_reg
         if recv_ty == "%struct.String*" {
-            gepb := cg.fresh()
-            cg.emit(gepb + " = getelementptr inbounds %struct.String, %struct.String* " + recv_reg + ", i32 0, i32 0")
-            bb_ := cg.fresh()
-            cg.emit(bb_ + " = load i8*, i8** " + gepb)
-            recv_pass = bb_
+            recv_pass = _emit_string_text(cg, recv_reg)
             arg_ty_str = "i8*"
         }
         if recv_ty == "i1" {
@@ -3781,30 +3692,11 @@ define _gen_method_call(cg: FnCG, c: Call) -> String {
                     + ", i8* " + null_gep)
             return safe_reg
         }
-        // %struct.String*.str() — extract the buffer field.
-        // Null-guarded via branch: chained accesses like
-        // `${find_result.text}` where find returned null yield
-        // a null String* here, and blindly deref'ing segfaults.
+        // %struct.String*.str() — its text (null stays null: chained
+        // accesses like `${find_result.text}` where find returned null
+        // yield a null String* here).
         if recv_ty == "%struct.String*" {
-            slot_ss := "%" + cg.fresh_label("sstr.res")
-            cg.emit_entry(slot_ss + " = alloca i8*")
-            cg.emit("store i8* null, i8** " + slot_ss)
-            nn_ss := cg.fresh()
-            cg.emit(nn_ss + " = icmp ne %struct.String* " + recv_reg + ", null")
-            ok_ss := cg.fresh_label("ss.ok")
-            end_ss := cg.fresh_label("ss.end")
-            cg.emit("br i1 " + nn_ss + ", label %" + ok_ss + ", label %" + end_ss)
-            cg.emit_raw(ok_ss + ":")
-            gep_buf := cg.fresh()
-            cg.emit(gep_buf + " = getelementptr inbounds %struct.String, %struct.String* " + recv_reg + ", i32 0, i32 0")
-            buf := cg.fresh()
-            cg.emit(buf + " = load i8*, i8** " + gep_buf)
-            cg.emit("store i8* " + buf + ", i8** " + slot_ss)
-            cg.emit("br label %" + end_ss)
-            cg.emit_raw(end_ss + ":")
-            final_ss := cg.fresh()
-            cg.emit(final_ss + " = load i8*, i8** " + slot_ss)
-            return final_ss
+            return _emit_string_text(cg, recv_reg)
         }
         // Int.str(): snprintf("%d", x) into a 12-byte buffer
         // (max i32 in decimal is 11 chars + null).
@@ -4710,16 +4602,12 @@ define _gen_map_method(cg: FnCG, name: String, recv_reg: String, args: List) -> 
     key_reg := _gen_expr(cg, key_expr)
     key_ty := _expr_static_ty(cg, key_expr)
     // Coerce key to i8* (the strcmp / hash-lookup ABI). For
-    // `%struct.String*` extract the `_buffer` field; other
+    // `%struct.String*` take its text (_emit_string_text); other
     // pointer kinds bitcast through. Stdlib-typed string
     // literals from bundled packages otherwise leak `%struct.
     // String*` into the scan and trip llc.
     if key_ty == "%struct.String*" {
-        key_buf_gep := cg.fresh()
-        cg.emit(key_buf_gep + " = getelementptr inbounds %struct.String, %struct.String* " + key_reg + ", i32 0, i32 0")
-        key_buf := cg.fresh()
-        cg.emit(key_buf + " = load i8*, i8** " + key_buf_gep)
-        key_reg = key_buf
+        key_reg = _emit_string_text(cg, key_reg)
     } elif _is_ptr_ty(key_ty) and key_ty != "i8*" {
         key_cast := cg.fresh()
         cg.emit(key_cast + " = bitcast " + key_ty + " " + key_reg + " to i8*")
@@ -4737,11 +4625,7 @@ define _gen_map_method(cg: FnCG, name: String, recv_reg: String, args: List) -> 
         // Same coercion as the key — stdlib values arrive as
         // typed struct pointers; flatten to i8* for storage.
         if val_ty == "%struct.String*" {
-            val_buf_gep := cg.fresh()
-            cg.emit(val_buf_gep + " = getelementptr inbounds %struct.String, %struct.String* " + val_reg + ", i32 0, i32 0")
-            val_buf := cg.fresh()
-            cg.emit(val_buf + " = load i8*, i8** " + val_buf_gep)
-            val_reg = val_buf
+            val_reg = _emit_string_text(cg, val_reg)
             val_ty = "i8*"
         } elif _is_ptr_ty(val_ty) and val_ty != "i8*" {
             val_cast := cg.fresh()
@@ -4914,13 +4798,13 @@ define _gen_map_method(cg: FnCG, name: String, recv_reg: String, args: List) -> 
     return "0"
 }
 
-// Create an empty `%QList` (length=0, capacity=1, a 4-byte
+// Create an empty `%QList` (16-byte header: length=0, capacity=1; a 4-byte
 // data buffer) so .append has somewhere to land before its
 // first growth.
 define _gen_list_new(cg: FnCG) -> String {
     cg.mod.ensure_decl("malloc", "declare i8* @malloc(i64)")
     raw := cg.fresh()
-    cg.emit(raw + " = call i8* @malloc(i64 12)")
+    cg.emit(raw + " = call i8* @malloc(i64 16)")
     base := cg.fresh()
     cg.emit(base + " = bitcast i8* " + raw + " to %QList*")
     data_raw := cg.fresh()
@@ -4950,7 +4834,7 @@ define _gen_list_new(cg: FnCG) -> String {
 define _gen_listp_new(cg: FnCG) -> String {
     cg.mod.ensure_decl("malloc", "declare i8* @malloc(i64)")
     raw := cg.fresh()
-    cg.emit(raw + " = call i8* @malloc(i64 12)")
+    cg.emit(raw + " = call i8* @malloc(i64 16)")
     base := cg.fresh()
     cg.emit(base + " = bitcast i8* " + raw + " to %QListP*")
     // Initial data: 1 slot × 8 bytes (one i8*).
@@ -4992,7 +4876,7 @@ define _gen_map_keys(cg: FnCG, recv_reg: String) -> String {
     cg.emit(ents + " = load %QMapKV*, %QMapKV** " + ment_gep)
     // Allocate the %QListP* header (12 bytes).
     raw := cg.fresh()
-    cg.emit(raw + " = call i8* @malloc(i64 12)")
+    cg.emit(raw + " = call i8* @malloc(i64 16)")
     base := cg.fresh()
     cg.emit(base + " = bitcast i8* " + raw + " to %QListP*")
     // Allocate the data buffer. cap = mlen + 1 (always >= 1 slot)
@@ -5111,7 +4995,7 @@ define _gen_list_lit(cg: FnCG, elems: List) -> String {
     if cap < 1 { cap = 1 }
     // 12-byte header: i32 length + i32 capacity + i32* data.
     raw := cg.fresh()
-    cg.emit(raw + " = call i8* @malloc(i64 12)")
+    cg.emit(raw + " = call i8* @malloc(i64 16)")
     base := cg.fresh()
     cg.emit(base + " = bitcast i8* " + raw + " to %QList*")
     // Allocate the data buffer separately so .append can
@@ -5168,7 +5052,7 @@ define _gen_listp_lit(cg: FnCG, elems: List) -> String {
     cap := n
     if cap < 1 { cap = 1 }
     raw := cg.fresh()
-    cg.emit(raw + " = call i8* @malloc(i64 12)")
+    cg.emit(raw + " = call i8* @malloc(i64 16)")
     base := cg.fresh()
     cg.emit(base + " = bitcast i8* " + raw + " to %QListP*")
     data_bytes := cap * 8
@@ -5577,12 +5461,22 @@ define _gen_field_set(cg: FnCG, obj: Expr, name: String, value: Expr) -> void {
     // Pointer-type coercion: stdlib structs declare fields as
     // `%struct.List*` / `%struct.Map*` / `%struct.String*` but
     // selfhost may produce a `%QListP*` / `%QMap*` / `i8*` value
-    // for them. Bitcast pointer-to-pointer (memory layouts
-    // intentionally diverge but selfhost is self-consistent
-    // about which shape it uses, so casting through is safe so
-    // long as no stdlib helper reads the bytes).
+    // for them. A selfhost list stored into a List field is
+    // converted to a runtime List (as VarDecl does): the field's
+    // methods (`self.items.append(x)`) go to the runtime, which
+    // reads the bytes. Other pointers bitcast through (selfhost is
+    // self-consistent about which shape it uses).
     if val_ty != field_ty {
-        if _is_ptr_ty(val_ty) and _is_ptr_ty(field_ty) {
+        if (val_ty == "%QListP*" or val_ty == "%QList*") and field_ty == "%struct.List*" {
+            conv_fn := "__qsh_qlistp_to_list"
+            if val_ty == "%QList*" { conv_fn = "__qsh_qlist_to_list" }
+            cg.mod.ensure_decl(conv_fn, "declare %struct.List* @" + conv_fn + "(i8*)")
+            lbc := cg.fresh()
+            cg.emit(lbc + " = bitcast " + val_ty + " " + val_reg + " to i8*")
+            lcv := cg.fresh()
+            cg.emit(lcv + " = call %struct.List* @" + conv_fn + "(i8* " + lbc + ")")
+            val_reg = lcv
+        } elif _is_ptr_ty(val_ty) and _is_ptr_ty(field_ty) {
             cast_reg := cg.fresh()
             cg.emit(cast_reg + " = bitcast " + val_ty + " " + val_reg + " to " + field_ty)
             val_reg = cast_reg
@@ -6131,16 +6025,15 @@ define _gen_stmt(cg: FnCG, st: Stmt) -> void {
             // Callable invocations especially: indirect calls
             // return i8* (the TAny erasure), but the predicate's
             // real return is i1 — the byte value 0/1 matches
-            // i1 semantics so `icmp ne i8* %cond, null`-style
-            // wouldn't be right; we ptrtoint to i32 first and
-            // compare against 0 instead, which extracts the
-            // lower bit correctly.
+            // i1 semantics. Compare the full 64 bits against 0: a
+            // truncation to i32 would make a real pointer whose low
+            // half is zero false (PIE addresses sit above 4 GiB).
             if cond_ty != "i1" {
                 if _is_ptr_ty(cond_ty) {
                     p2i := cg.fresh()
-                    cg.emit(p2i + " = ptrtoint " + cond_ty + " " + cond + " to i32")
+                    cg.emit(p2i + " = ptrtoint " + cond_ty + " " + cond + " to i64")
                     new_cond := cg.fresh()
-                    cg.emit(new_cond + " = icmp ne i32 " + p2i + ", 0")
+                    cg.emit(new_cond + " = icmp ne i64 " + p2i + ", 0")
                     cond = new_cond
                 } elif cond_ty == "i32" {
                     new_cond := cg.fresh()

@@ -3,7 +3,7 @@
 #
 # Compile + JIT-execute a Quirk source file via the selfhost
 # compiler (bin/quirk-selfhost emits LLVM IR; llc-14 lowers to
-# x86_64 assembly; clang-14 -no-pie links against the shared
+# x86_64 assembly; clang-14 -pie links against the shared
 # runtime; exec runs the result). Behaves enough like the old
 # bin/quirk (now bin/quirk-cpp) to drive day-to-day compile +
 # execute workflows.
@@ -111,8 +111,8 @@ if [ ! -s "$LL" ]; then
     rm -rf "$TMP"
     exit 1
 fi
-llc-14 "$LL" -o "$S"
-clang-14 -no-pie "$S" "$RUNTIME" -lm -o "$BIN"
+llc-14 -relocation-model=pic "$LL" -o "$S"
+clang-14 -pie "$S" "$RUNTIME" -lm -o "$BIN"
 
 # eval forwards parsed-out program args while preserving quoting.
 eval exec "\"$BIN\"" $prog_args

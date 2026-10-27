@@ -22,6 +22,103 @@
 
 #include "types.h"
 
+// Prototypes for the runtime functions the aliases forward to. Without
+// them C assumes an `int` return, which truncated every returned
+// pointer to 32 bits — harmless only while selfhost linked -no-pie and
+// every address sat below 4 GiB. The build uses -Werror=implicit-function-
+// declaration so a new alias can't reintroduce that.
+extern void* Core_Collections_List_List___get(List* self, int index);
+extern void Core_Collections_List_List___init(List* self);
+extern void Core_Collections_List_List___set(List* self, int index, void* item);
+extern int Core_Collections_List_List_all(List* self, Callable* cb);
+extern int Core_Collections_List_List_any(List* self, Callable* cb);
+extern void Core_Collections_List_List_append(List* self, void* item);
+extern void Core_Collections_List_List_clear(List* self);
+extern int Core_Collections_List_List_contains(List* self, void* elem);
+extern void Core_Collections_List_List_each(List* self, Callable* cb);
+extern List* Core_Collections_List_List_filter(List* self, Callable* cb);
+extern void* Core_Collections_List_List_find(List* self, Callable* cb);
+extern int Core_Collections_List_List_is_empty(List* self);
+extern int Core_Collections_List_List_length(List* self);
+extern List* Core_Collections_List_List_map(List* self, Callable* cb);
+extern void* Core_Collections_List_List_pop(List* self);
+extern void* Core_Collections_List_List_reduce(List* self, void* initial, Callable* cb);
+extern List* Core_Collections_List_List_slice(List* self, int start, int end);
+extern void Core_Collections_Map_Map___init(Map* self);
+extern void Core_Collections_Map_Map_clear(Map* self);
+extern void* Core_Collections_Map_Map_get(Map* self, String* keyObj);
+extern int Core_Collections_Map_Map_has(Map* self, String* keyObj);
+extern List* Core_Collections_Map_Map_keys(Map* self);
+extern int Core_Collections_Map_Map_length(Map* self);
+extern void Core_Collections_Map_Map_put(Map* self, String* keyObj, void* value);
+extern void Core_Collections_Map_Map_remove(Map* self, String* keyObj);
+extern List* Core_Collections_Map_Map_values(Map* self);
+extern void Core_Collections_Queue_Queue___init(Queue* self);
+extern void Core_Collections_Set_Set___init(Set* self);
+extern void Core_Collections_Set_Set_add(Set* self, void* val);
+extern Set* Core_Collections_Set_Set_difference(Set* self, Set* other);
+extern int Core_Collections_Set_Set_has(Set* self, void* val);
+extern Set* Core_Collections_Set_Set_intersection(Set* self, Set* other);
+extern void Core_Collections_Set_Set_remove(Set* self, void* val);
+extern int Core_Collections_Set_Set_size(Set* self);
+extern List* Core_Collections_Set_Set_to_list(Set* self);
+extern Set* Core_Collections_Set_Set_union(Set* self, Set* other);
+extern void Core_String_String___init(String* self, char* raw);
+extern String* Core_String_String_capitalize(String* self);
+extern String* Core_String_String_center(String* self, int width, String* pad);
+extern int Core_String_String_contains(String* self, String* sub);
+extern int Core_String_String_count(String* self, String* sub);
+extern int Core_String_String_distance(String* self, String* other);
+extern String* Core_String_String_encode(String* self);
+extern int Core_String_String_endswith(String* self, String* suffix);
+extern int Core_String_String_find(String* self, String* sub);
+extern int Core_String_String_index(String* self, String* sub);
+extern int Core_String_String_is_alpha(String* self);
+extern int Core_String_String_is_digit(String* self);
+extern int Core_String_String_is_lower(String* self);
+extern int Core_String_String_is_space(String* self);
+extern int Core_String_String_is_upper(String* self);
+extern String* Core_String_String_join(String* self, List* items);
+extern int Core_String_String_length(String* self);
+extern List* Core_String_String_lines(String* self);
+extern String* Core_String_String_ljust(String* self, int width, String* pad);
+extern String* Core_String_String_lower(String* self);
+extern String* Core_String_String_lstrip(String* self);
+extern String* Core_String_String_remove(String* self, String* sub);
+extern String* Core_String_String_repeat(String* self, int n);
+extern String* Core_String_String_replace(String* self, String* old_str, String* new_str);
+extern String* Core_String_String_reverse(String* self);
+extern String* Core_String_String_rjust(String* self, int width, String* pad);
+extern String* Core_String_String_rstrip(String* self);
+extern List* Core_String_String_split(String* self, String* delim);
+extern int Core_String_String_startswith(String* self, String* prefix);
+extern String* Core_String_String_substring(String* self, int start, int end);
+extern String* Core_String_String_title(String* self);
+extern double Core_String_String_to_float(String* self);
+extern int Core_String_String_to_int(String* self);
+extern String* Core_String_String_trim(String* self);
+extern String* Core_String_String_upper(String* self);
+extern void Io_File_File___init(File* self, String* path, String* mode);
+extern void Io_File_File_close(File* self);
+extern String* Io_File_File_read(File* self);
+extern String* Io_File_File_read_line(File* self);
+extern void Io_File_File_write(File* self, String* s);
+extern String* Sys_ansi(String* name);
+extern void Sys_group_depth_dec();
+extern int Sys_group_depth_get();
+extern void Sys_group_depth_inc();
+extern int Sys_read_key();
+extern String* Sys_read_password();
+extern char* Sys_srcline(const char* filename, int target_line);
+extern int Sys_terminal_cols();
+extern int Sys_terminal_rows();
+extern int Sys_timer_end(String* label);
+extern void Sys_timer_start(String* label);
+
+// String bridges (defined with the String aliases below).
+static String* qsh_as_string(void* p);
+static void* qsh_cstr_out(String* r);
+
 // ---- sys package ----------------------------------------------------------
 
 extern String* Sys_version();
@@ -318,13 +415,13 @@ void*  File__read_line(void* s)                                { return Io_File_
 
 // Bare top-level sys functions selfhost emits without package prefix.
 
-void   ansi          (const char* c) { Sys_ansi(c); }
+void*  ansi          (void* c)       { return qsh_cstr_out(Sys_ansi(qsh_as_string(c))); }
 int    terminal_cols (void)          { return Sys_terminal_cols(); }
 int    terminal_rows (void)          { return Sys_terminal_rows(); }
 int    read_key      (void)          { return Sys_read_key(); }
 void*  read_password (void)          { return Sys_read_password(); }
-void   timer_start   (const char* l) { Sys_timer_start(l); }
-void   timer_end     (const char* l) { Sys_timer_end(l); }
+void   timer_start   (void* l)       { Sys_timer_start(qsh_as_string(l)); }
+int    timer_end     (void* l)       { return Sys_timer_end(qsh_as_string(l)); }
 void   group_depth_inc(void)         { Sys_group_depth_inc(); }
 void   group_depth_dec(void)         { Sys_group_depth_dec(); }
 int    group_depth_get(void)         { return Sys_group_depth_get(); }
@@ -704,20 +801,41 @@ void* __qsh_map_values(void* m)                    { return Core_Collections_Map
 // String*. Each bridge converts its string arguments with
 // qsh_as_string (String* passes through, a selfhost C string is
 // wrapped). Before, the raw pointers were passed straight through as
-// String* (`"x".encode()` crashed in strlen). Results stay String*:
-// selfhost types these calls' values as %struct.String* and reads
-// `->buffer` from them — except join, whose caller uses the result as a
-// raw C string; that one comes back headered and malloc'd (qsh_cstr_out),
-// since selfhost keeps values in malloc'd lists / maps the GC can't see.
+// String* (`"x".encode()` crashed in strlen). String results come back
+// as headered, malloc'd C strings (qsh_cstr_out), selfhost's own String
+// representation — malloc'd because selfhost keeps values in malloc'd
+// lists / maps the GC can't see. Where selfhost types such a value
+// %struct.String*, it reads the text through __qsh_cstr_of.
 // String arguments here are known to be strings, so no tagged-Int
 // reading: a headered runtime String* passes through, anything else is a
-// selfhost raw C string — including literals, which sit below 4 GiB in
-// selfhost's non-PIE binaries (a generic reader would take them for
-// small Ints).
+// selfhost raw C string.
+
+// Header type of a value known to be a pointer (never a tagged Int).
+// Unlike quirk_type_of this also reads below 4 GiB (where a binary
+// linked -no-pie keeps its literals and heap). p ≡ 8 (mod 16) keeps p-8 inside the
+// same 16-byte block, so on the same (mapped) page as p.
+static uint32_t qsh_type_of(void* p) {
+    if ((uintptr_t)p < 0x10000UL || ((uintptr_t)p & 15) != 8) return QT_NONE;
+    const QuirkHeader* h = (const QuirkHeader*)((char*)p - sizeof(QuirkHeader));
+    return h->magic == QUIRK_HDR_MAGIC ? h->type_id : QT_NONE;
+}
+
 static String* qsh_as_string(void* p) {
     if (!p) return NULL;
-    if (quirk_type_of(p) == QT_STRING) return (String*)p;
+    if (qsh_type_of(p) == QT_STRING) return (String*)p;
     return make_String((const char*)p);
+}
+
+// The text of a value selfhost types `%struct.String*`: either a real
+// runtime String* or a raw C string bitcast to it (literals, concat
+// results, bridge returns). The header tells them apart; a header-less
+// value keeps the old reading (a String-shaped struct, e.g. an instance
+// of a selfhost-compiled String subclass).
+void* __qsh_cstr_of(void* p) {
+    if (!p) return NULL;
+    uint32_t t = qsh_type_of(p);
+    if (t == QT_STRING || t == QT_NONE) return ((String*)p)->buffer;
+    return p;
 }
 
 static void* qsh_cstr_out(String* r) {
@@ -731,13 +849,13 @@ static void* qsh_cstr_out(String* r) {
 }
 #define S(x) qsh_as_string(x)
 
-void* __qsh_str_ljust    (void* s, int w, void* p) { return Core_String_String_ljust(S(s), w, S(p)); }
-void* __qsh_str_rjust    (void* s, int w, void* p) { return Core_String_String_rjust(S(s), w, S(p)); }
-void* __qsh_str_center   (void* s, int w, void* p) { return Core_String_String_center(S(s), w, S(p)); }
-void* __qsh_str_encode   (void* s)                 { return Core_String_String_encode(S(s)); }
+void* __qsh_str_ljust    (void* s, int w, void* p) { return qsh_cstr_out(Core_String_String_ljust(S(s), w, S(p))); }
+void* __qsh_str_rjust    (void* s, int w, void* p) { return qsh_cstr_out(Core_String_String_rjust(S(s), w, S(p))); }
+void* __qsh_str_center   (void* s, int w, void* p) { return qsh_cstr_out(Core_String_String_center(S(s), w, S(p))); }
+void* __qsh_str_encode   (void* s)                 { return qsh_cstr_out(Core_String_String_encode(S(s))); }
 int   __qsh_str_distance (void* s, void* other)    { return Core_String_String_distance(S(s), S(other)); }
-void* __qsh_str_replace  (void* s, void* from, void* to) { return Core_String_String_replace(S(s), S(from), S(to)); }
-void* __qsh_str_remove   (void* s, void* needle)   { return Core_String_String_remove(S(s), S(needle)); }
+void* __qsh_str_replace  (void* s, void* from, void* to) { return qsh_cstr_out(Core_String_String_replace(S(s), S(from), S(to))); }
+void* __qsh_str_remove   (void* s, void* needle)   { return qsh_cstr_out(Core_String_String_remove(S(s), S(needle))); }
 // The `xs` receiver reaches us as a runtime List — selfhost's
 // VarDecl / call-boundary bridge converts %QListP → %struct.List
 // before values flow into these aliases.
@@ -747,7 +865,7 @@ void* __qsh_str_join(void* s, void* xs) {
 }
 void* __qsh_str_split    (void* s, void* sep)      { return Core_String_String_split(S(s), S(sep)); }
 void* __qsh_str_lines    (void* s)                 { return Core_String_String_lines(S(s)); }
-void* __qsh_str_repeat   (void* s, int n)          { return Core_String_String_repeat(S(s), n); }
+void* __qsh_str_repeat   (void* s, int n)          { return qsh_cstr_out(Core_String_String_repeat(S(s), n)); }
 int   __qsh_str_to_int   (void* s)                 { return Core_String_String_to_int(S(s)); }
 double __qsh_str_to_float(void* s)                 { return Core_String_String_to_float(S(s)); }
 int   __qsh_str_find     (void* s, void* n)        { return Core_String_String_find(S(s), S(n)); }
@@ -879,9 +997,9 @@ char* quirk_opaque_to_cstr(void* val) {
 // `puts(0x2A)` (the tagged-int representation of 42) segfaults
 // because the runtime tries to read from address 42.
 //
-// Under `-no-pie` binaries the .rodata section starts around
-// 0x40_0000 (~4MB), so any i8* below that threshold is
-// unambiguously a tagged int. Format it as a decimal string.
+// No mapping sits below 0x40_0000 (~4MB; that is where a -no-pie
+// binary's .rodata starts, PIE ones load far higher), so any i8* below
+// that threshold is unambiguously a tagged int. Format it as a decimal string.
 // Above the threshold, assume it's a real c-string pointer
 // (static or heap). Null → "null" for consistency with
 // existing print-of-null semantics.

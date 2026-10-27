@@ -1184,7 +1184,7 @@ EOF
         rm -f "$ll_path" "$s_path" "$bin_path"
         return
     fi
-    llc-14 "$ll_path" -o "$s_path" 2>/dev/null
+    llc-14 -relocation-model=pic "$ll_path" -o "$s_path" 2>/dev/null
     if [ ! -s "$s_path" ]; then
         echo "FAIL  $label  (llc rejected IR)"
         echo "      ir at $ll_path"
@@ -1196,7 +1196,7 @@ EOF
     # exception bridge (quirk_get_jmp_buf / quirk_set_exception
     # / quirk_get_exception / quirk_pop_try) resolves. Unused
     # helpers don't affect the resulting binary.
-    "${CLANG:-clang-14}" -no-pie "$s_path" "$RUNTIME" -lm -ldl -o "$bin_path" \
+    "${CLANG:-clang-14}" -pie "$s_path" "$RUNTIME" -lm -ldl -o "$bin_path" \
         -Wl,-rpath,"$(dirname "$RUNTIME")" 2>/dev/null
     if [ ! -x "$bin_path" ]; then
         echo "FAIL  $label  (clang link failed)"
@@ -1281,8 +1281,8 @@ EOF
     bin_path=$(mktemp --suffix=.bin)
     "$QUIRK" --no-aot --no-cache "$driver" > "$ll_path" 2>/dev/null
     rm -f "$driver"
-    llc-14 "$ll_path" -o "$s_path" 2>/dev/null
-    "${CLANG:-clang-14}" -no-pie "$s_path" -o "$bin_path" 2>/dev/null
+    llc-14 -relocation-model=pic "$ll_path" -o "$s_path" 2>/dev/null
+    "${CLANG:-clang-14}" -pie "$s_path" -o "$bin_path" 2>/dev/null
     local got_out
     got_out=$("$bin_path" hello world from quirk)
     local got_exit=$?
@@ -1327,8 +1327,8 @@ EOF
         rm -f "$src_path" "$ll_path" "$s_path" "$bin_path"
         return
     fi
-    llc-14 "$ll_path" -o "$s_path" 2>/dev/null
-    "${CLANG:-clang-14}" -no-pie "$s_path" -o "$bin_path" 2>/dev/null
+    llc-14 -relocation-model=pic "$ll_path" -o "$s_path" 2>/dev/null
+    "${CLANG:-clang-14}" -pie "$s_path" -o "$bin_path" 2>/dev/null
     if [ ! -x "$bin_path" ]; then
         echo "FAIL  $label  (clang link failed on selfhost-emitted IR)"
         fails+=1
@@ -1373,8 +1373,8 @@ fixedpoint_test() {
         rm -f "$ir1" "$ir2" "$v2asm" "$v2bin"
         return
     fi
-    llc-14 "$ir1" -o "$v2asm" 2>/dev/null
-    "${CLANG:-clang-14}" -no-pie "$v2asm" -o "$v2bin" 2>/dev/null
+    llc-14 -relocation-model=pic "$ir1" -o "$v2asm" 2>/dev/null
+    "${CLANG:-clang-14}" -pie "$v2asm" -o "$v2bin" 2>/dev/null
     if [ ! -x "$v2bin" ]; then
         echo "FAIL  $label  (v2 link failed)"
         fails+=1

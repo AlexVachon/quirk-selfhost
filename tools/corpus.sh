@@ -46,9 +46,9 @@ for t in tests/*.quirk; do
     detail=""
     if ! timeout 30 "$SELFHOST" "$t" "$ll" > "$WORK/$name.emit.log" 2>&1 || [ ! -s "$ll" ]; then
         status=emit; detail=$(head -3 "$WORK/$name.emit.log")
-    elif ! llc-14 "$ll" -o "$s" 2> "$WORK/$name.llc.log"; then
+    elif ! llc-14 -relocation-model=pic "$ll" -o "$s" 2> "$WORK/$name.llc.log"; then
         status=llc; detail=$(head -3 "$WORK/$name.llc.log")
-    elif ! clang-14 -no-pie "$s" "$RUNTIME" "$SHIM" -lm -ldl -o "$bin" \
+    elif ! clang-14 -pie "$s" "$RUNTIME" "$SHIM" -lm -ldl -o "$bin" \
             -Wl,-rpath,"$(dirname "$RUNTIME")" -Wl,-rpath,"$(dirname "$SHIM")" \
             2> "$WORK/$name.link.log"; then
         status=link; detail=$(grep -m3 "undefined reference" "$WORK/$name.link.log")
