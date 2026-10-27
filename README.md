@@ -9,7 +9,7 @@ in Quirk itself.
 - **Bootstrap proof.** `bin/quirk-selfhost` compiles its own source
   to byte-identical IR under itself. The language is complete enough
   to describe its own compiler. Verify with `make fixedpoint`.
-- **Working subset compiler.** 39 of the production compiler's 58
+- **Working subset compiler.** 40 of the production compiler's 58
   corpus tests run to completion; 28 produce output identical to
   `quirk-cpp` (see [Coverage](#coverage) below).
 - **Milestone artifact.** Split out from the main `quirk` repo at
@@ -105,11 +105,11 @@ the sibling quirk checkout's `quirk-compiler/tests/*.quirk`. It reports
 where each test stops — `emit` / `llc` / `link` / `crash` / `exit` — and,
 for tests that run, whether the output matches `bin/quirk-cpp`.
 
-Against quirk v6.0.3 (58 tests):
+Against quirk v6.1.1 (58 tests):
 
 | | |
 |---|---|
-| Clean exits (ran to completion, exit 0) | **39 / 58** |
+| Clean exits (ran to completion, exit 0) | **40 / 58** |
 | Output identical to `quirk-cpp` | **28 / 58** |
 
 The old "40/60" figure counted clean exits only, against the v5.1 corpus.
@@ -126,14 +126,14 @@ What the remaining tests need:
   most crashes and most wrong output (`<list>` placeholders, numbers
   printed for map values).
 - Closure capture (lambda block bodies referencing outer scope)
-- Variadic-arg auto-packing at call sites
 - Distinguishable-null `Int?` / `Bool?` representation
 - Decorators; package-qualified calls (`slug`, `File`); mixed
   top-level statements + definitions (no `main` synthesized)
-- `List.__set` has no lowering (calls are silently dropped)
 
-Named arguments and parameter defaults are bound at call sites since the
-v6.0.3 sync (functions, constructors, methods).
+Named arguments, parameter defaults and variadic `...rest` packing are
+bound at call sites (functions, constructors, methods; variadic packing
+for Quirk-defined functions only). `List.__set` and `b: Bool := xs[i]`
+lower correctly.
 
 ## License
 

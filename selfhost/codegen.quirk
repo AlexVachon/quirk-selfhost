@@ -181,10 +181,14 @@ struct _Sig {
     // The declaration's Params (names + default_expr), for binding
     // named / omitted call arguments. Empty for synthesized sigs.
     params: List
+    // Extern (runtime-implemented): variadic args are not packed, since
+    // a selfhost list literal isn't the runtime's List layout.
+    is_extern: Bool
     define __init(self, param_tys: List, ret_ty: String) -> void {
         self.param_tys = param_tys
         self.ret_ty = ret_ty
         self.params = List()
+        self.is_extern = false
     }
 }
 
@@ -505,45 +509,61 @@ define _bind_call_args(cg: FnCG, llvm_name: String, args: List) -> List {
     params := sig.params
     n := params.length()
     if n == 0 { return args }
-    // Split into positional (in order) and named args.
-    positional := List()
+    // A trailing `...rest` parameter collects extra positional args
+    // into a List (Quirk-defined functions only; see _Sig.is_extern).
+    last_p: Param := params.__get(n - 1)
+    variadic := last_p.is_variadic
+    if variadic and sig.is_extern { return args }
+    nfixed := n
+    if variadic { nfixed = n - 1 }
+    // Positional args *before* the first named one fill the fixed
+    // params in order; every other positional arg (past the fixed
+    // params, or after a named arg) goes to the variadic list —
+    // quirk-cpp's rule: `log(prefix = ">>", "a", "b")` packs a, b.
+    leading := List()
+    rest := List()
     named := List()
+    seen_named := false
     k := 0
     while k < args.length() {
         a: Expr := args.__get(k)
-        if _arg_name(a) == "" {
-            positional.append(a)
-        } else {
+        if _arg_name(a) != "" {
             named.append(a)
+            seen_named = true
+        } elif seen_named == false and leading.length() < nfixed {
+            leading.append(a)
+        } else {
+            rest.append(a)
         }
         k = k + 1
     }
-    if named.length() == 0 and positional.length() >= n { return args }
-    if positional.length() > n { return args }
-    // Every named arg must name a parameter not already filled
+    if named.length() == 0 and rest.length() == 0 and leading.length() >= nfixed and variadic == false {
+        return args
+    }
+    if rest.length() > 0 and variadic == false { return args }
+    // Every named arg must name a fixed parameter not already filled
     // positionally.
     k = 0
     while k < named.length() {
         nm := _arg_name(named.__get(k))
         found := -1
         j := 0
-        while j < n {
+        while j < nfixed {
             pj: Param := params.__get(j)
             if pj.name == nm { found = j }
             j = j + 1
         }
-        if found < positional.length() { return args }
+        if found < leading.length() { return args }
         k = k + 1
     }
     // One value per parameter, in order. Built with append only —
-    // selfhost has no List.__set lowering.
+    // selfhost has no List.__set lowering for its own use here.
     bound := List()
     j := 0
-    while j < n {
+    while j < nfixed {
         pk: Param := params.__get(j)
-        if pk.is_variadic { return args }
-        if j < positional.length() {
-            bound.append(positional.__get(j))
+        if j < leading.length() {
+            bound.append(leading.__get(j))
         } else {
             hit := -1
             k = 0
@@ -561,6 +581,10 @@ define _bind_call_args(cg: FnCG, llvm_name: String, args: List) -> List {
         }
         j = j + 1
     }
+    // Pack as `__varargs(...)`: always the pointer-element list the
+    // variadic param is typed as (a plain list literal of Ints would
+    // lower to the Int-element %QList).
+    if variadic { bound.append(Call(Ident("__varargs"), rest)) }
     return bound
 }
 
@@ -586,6 +610,16 @@ define _arg_value(a: Expr) -> Expr {
         case _ => {}
     }
     return a
+}
+
+// The synthetic `__varargs(a, b, ...)` call _bind_call_args builds for a
+// variadic parameter; lowers to a pointer-element list literal.
+define _is_varargs_call(c: Call) -> Bool {
+    match c.callee {
+        case Ident as id => { return id.name == "__varargs" }
+        case _ => {}
+    }
+    return false
 }
 
 define _gen_named_value(cg: FnCG, inner: List) -> String {
@@ -1542,6 +1576,7 @@ define _gen_expr(cg: FnCG, e: Expr) -> String {
             // parameter binding: just its value (old behaviour).
             named_v := named_arg_inner(c)
             if named_v.length() > 0 { return _gen_named_value(cg, named_v) }
+            if _is_varargs_call(c) { return _gen_listp_lit(cg, c.args) }
             // Method call form: `obj.method(args)` parsed as
             // Call(FieldGet(obj, method), args). Dispatched
             // before the identifier-callee path so the bare
@@ -2586,6 +2621,7 @@ define _expr_static_ty(cg: FnCG, e: Expr) -> String {
         case Call as c => {
             named_t := named_arg_inner(c)
             if named_t.length() > 0 { return _static_named_value(cg, named_t) }
+            if _is_varargs_call(c) { return "%QListP*" }
             // User-defined call: signature was pre-registered by
             // emit_module, so the return type is known here.
             // A struct constructor call (`Foo(...)`) returns the
@@ -5126,6 +5162,24 @@ define _gen_listp_lit(cg: FnCG, elems: List) -> String {
                 cast := cg.fresh()
                 cg.emit(cast + " = bitcast " + ev_ty + " " + ev + " to i8*")
                 ev_i8 = cast
+            } elif ev_ty == "i32" {
+                // Int element in a pointer slot: tagged-int inttoptr,
+                // the runtime's convention for untyped Int values.
+                ti := cg.fresh()
+                cg.emit(ti + " = inttoptr i32 " + ev + " to i8*")
+                ev_i8 = ti
+            } elif ev_ty == "i1" {
+                bz := cg.fresh()
+                cg.emit(bz + " = zext i1 " + ev + " to i32")
+                bi := cg.fresh()
+                cg.emit(bi + " = inttoptr i32 " + bz + " to i8*")
+                ev_i8 = bi
+            } elif ev_ty == "double" {
+                db := cg.fresh()
+                cg.emit(db + " = bitcast double " + ev + " to i64")
+                di := cg.fresh()
+                cg.emit(di + " = inttoptr i64 " + db + " to i8*")
+                ev_i8 = di
             }
         }
         gep := cg.fresh()
@@ -5697,6 +5751,45 @@ define _ensure_fresh_slot(cg: FnCG, name: String, ty: String) -> _Slot {
     return _ensure_slot(cg, name, ty)
 }
 
+// True for `obj.__set(i, v)` where obj is a list (selfhost flat
+// `%QList*` / `%QListP*` or a stdlib `%struct.List*`). User structs with
+// their own `__set` keep normal method dispatch.
+define _list_set_call(cg: FnCG, e: Expr) -> Bool {
+    match e {
+        case Call as c => {
+            if c.args.length() != 2 { return false }
+            match c.callee {
+                case FieldGet as fg => {
+                    if fg.name != "__set" { return false }
+                    oty := _expr_static_ty(cg, fg.obj)
+                    return oty == "%QListP*" or oty == "%QList*" or oty == "%struct.List*"
+                }
+                case _ => {}
+            }
+        }
+        case _ => {}
+    }
+    return false
+}
+
+// Lower `obj.__set(i, v)` as the statement `obj[i] = v`. Separate from
+// _gen_stmt so the recursive call is its own site.
+define _gen_list_set(cg: FnCG, e: Expr) -> void {
+    match e {
+        case Call as c => {
+            match c.callee {
+                case FieldGet as fg => {
+                    i_e: Expr := c.args.__get(0)
+                    v_e: Expr := c.args.__get(1)
+                    _gen_stmt(cg, IndexSet(fg.obj, i_e, v_e))
+                }
+                case _ => {}
+            }
+        }
+        case _ => {}
+    }
+}
+
 define _gen_stmt(cg: FnCG, st: Stmt) -> void {
     match st {
         case Return as r => {
@@ -5755,7 +5848,13 @@ define _gen_stmt(cg: FnCG, st: Stmt) -> void {
             cg.emit("ret " + cg.ret_ty + " " + v)
         }
         case ExprStmt as es => {
-            _gen_expr(cg, es.expr)
+            // `xs.__set(i, v)` on a list: same lowering as `xs[i] = v`.
+            // It had no lowering at all, so the call was silently dropped.
+            if _list_set_call(cg, es.expr) {
+                _gen_list_set(cg, es.expr)
+            } else {
+                _gen_expr(cg, es.expr)
+            }
         }
         case VarDecl as v => {
             // Slot type follows either the user's annotation
@@ -5868,6 +5967,15 @@ define _gen_stmt(cg: FnCG, st: Stmt) -> void {
                 if ty == "i32" and rhs_ty == "i1" {
                     cast := cg.fresh()
                     cg.emit(cast + " = zext i1 " + rhs + " to i32")
+                    store_val = cast
+                }
+                // Pointer → Bool: `b: Bool := xs.__get(i)`. Bools in an
+                // i8* list slot are stored inttoptr'd (0 / 1), so the
+                // value is `ptr != null`. Storing the i8* into the i1
+                // slot directly was invalid IR.
+                if ty == "i1" and _is_ptr_ty(rhs_ty) {
+                    cast := cg.fresh()
+                    cg.emit(cast + " = icmp ne " + rhs_ty + " " + rhs + ", null")
                     store_val = cast
                 }
             }
@@ -6910,7 +7018,13 @@ define emit_module(decls: List) -> String {
                 pi := 0
                 while pi < fdp.params.length() {
                     pp_param: Param := fdp.params.__get(pi)
-                    ptys.append(_resolve_ty(mod, pp_param.type_annot))
+                    pp_ty := _resolve_ty(mod, pp_param.type_annot)
+                    // Same override as _gen_function: an unannotated
+                    // `...rest` is a pointer-element list, not i32.
+                    if pp_param.is_variadic and pp_param.type_annot == "" {
+                        pp_ty = "%QListP*"
+                    }
+                    ptys.append(pp_ty)
                     pi = pi + 1
                 }
                 rty := _resolve_ty(mod, fdp.ret_type)
@@ -6922,6 +7036,7 @@ define emit_module(decls: List) -> String {
                 }
                 fsig := _Sig(ptys, rty)
                 fsig.params = fdp.params
+                fsig.is_extern = fdp.is_extern
                 mod.register_sig(full_name, fsig)
             }
             case _ => {}

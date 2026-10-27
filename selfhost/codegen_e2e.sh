@@ -1466,11 +1466,13 @@ standalone_run "ELF: empty map literal {}" \
     return m.length() * 14
 }' \
     42
-standalone_run "ELF: variadic ...args param accepted" \
+# Trailing args pack into the variadic List (as in quirk-cpp, where
+# `count_(xs)` is a 1-element List holding xs). Until the v6.1 sync the
+# selfhost didn't pack, and this case passed a List explicitly.
+standalone_run "ELF: variadic ...args packs trailing args" \
     'define count_(...args: List) -> Int { return args.length() }
 define main() -> Int {
-    xs := ["a", "b", "c"]
-    return count_(xs) + 39
+    return count_("a", "b", "c") + 39
 }' \
     42
 
